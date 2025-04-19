@@ -1,5 +1,7 @@
 module github.com/groupcache/groupcache-go/v3
 
+replace github.com/groupcache/groupcache-go/v3 => github.com/jcastilloa/groupcache-go/v3 v3.0.0
+
 go 1.21.7
 
 toolchain go1.23.1

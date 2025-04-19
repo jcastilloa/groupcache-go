@@ -91,6 +91,10 @@ func (m *mutexCache) Add(key string, value transport.ByteView) {
 			},
 		}
 	}
+	if oldValue, ok := m.lru.Get(key); ok {
+		oldByteView := oldValue.(transport.ByteView)
+		m.bytes -= int64(len(key)) + int64(oldByteView.Len())
+	}
 	m.lru.Add(key, value, value.Expire())
 	m.bytes += int64(len(key)) + int64(value.Len())
 	m.removeOldest()

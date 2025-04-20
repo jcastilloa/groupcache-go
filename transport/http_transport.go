@@ -47,6 +47,8 @@ var bufferPool = sync.Pool{
 	New: func() interface{} { return new(bytes.Buffer) },
 }
 
+const maxBufferSize = 1024 * 1024 // 1MB
+
 type GroupCacheInstance interface {
 	GetGroup(string) Group
 }
@@ -281,7 +283,13 @@ func (t *HttpTransport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		b := bufferPool.Get().(*bytes.Buffer)
 		b.Reset()
-		defer bufferPool.Put(b)
+		defer func() {
+			if b.Cap() > maxBufferSize {
+				b = nil
+			} else {
+				bufferPool.Put(b)
+			}
+		}()
 		_, err := io.Copy(b, r.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -381,6 +389,14 @@ func (h *HttpClient) Get(ctx context.Context, in *pb.GetRequest, out *pb.GetResp
 		return fmt.Errorf("server returned: %v, %v", res.Status, string(msg))
 	}
 	b := bufferPool.Get().(*bytes.Buffer)
+	b.Reset()
+	defer func() {
+		if b.Cap() > maxBufferSize {
+			b = nil
+		} else {
+			bufferPool.Put(b)
+		}
+	}()
 	b.Reset()
 	defer bufferPool.Put(b)
 	_, err := io.Copy(b, res.Body)

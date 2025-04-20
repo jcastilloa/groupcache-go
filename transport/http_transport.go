@@ -283,12 +283,14 @@ func (t *HttpTransport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		b := bufferPool.Get().(*bytes.Buffer)
 		b.Reset()
+		bufferPool.Put(b)
 		defer func() {
-			if b.Cap() > maxBufferSize {
+			bufferPool.Put(b)
+			/*if b.Cap() > maxBufferSize {
 				b = nil
 			} else {
 				bufferPool.Put(b)
-			}
+			}*/
 		}()
 		_, err := io.Copy(b, r.Body)
 		if err != nil {
@@ -391,11 +393,12 @@ func (h *HttpClient) Get(ctx context.Context, in *pb.GetRequest, out *pb.GetResp
 	b := bufferPool.Get().(*bytes.Buffer)
 	b.Reset()
 	defer func() {
-		if b.Cap() > maxBufferSize {
+		/*if b.Cap() > maxBufferSize {
 			b = nil
 		} else {
 			bufferPool.Put(b)
-		}
+		}*/
+		bufferPool.Put(b)
 	}()
 	b.Reset()
 	defer bufferPool.Put(b)

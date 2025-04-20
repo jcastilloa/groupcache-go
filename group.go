@@ -170,53 +170,111 @@ func (g *group) Set(ctx context.Context, key string, value []byte, expire time.T
 		return errors.New("empty Set() key not allowed")
 	}
 
+	// Si no hay tamaño de caché, no hacemos nada
 	if g.maxCacheBytes <= 0 {
 		return nil
 	}
 
+	// Usamos singleflight para asegurar que solo una operación Set para la misma clave
+	// esté activa a la vez en este nodo (para la lógica de coordinación y actualización local/remota).
 	_, err := g.setGroup.Do(key, func() (interface{}, error) {
-		// If remote peer owns this key
+
+		// *** INICIO: Crear una copia del valor ***
+		// Se crea una copia explícita del slice de bytes.
+		// Esto es crucial para evitar que las goroutines que actualizan los peers
+		// retengan referencias al slice 'value' original o a versiones antiguas,
+		// permitiendo que el GC libere la memoria de ciclos anteriores.
+		valueCopy := make([]byte, len(value))
+		copy(valueCopy, value)
+		// *** FIN: Crear una copia del valor ***
+
+		// Determinar el nodo "dueño" de la clave según el hash consistente.
 		owner, isRemote := g.instance.PickPeer(key)
+
+		// Si el dueño es un nodo remoto...
 		if isRemote {
-			// Set the key/value on the remote peer
-			if err := g.setPeer(ctx, owner, key, value, expire); err != nil {
+			// ...enviar la operación Set al dueño (usando la copia).
+			// Esta llamada es síncrona dentro de la función de singleflight.Do.
+			if err := g.setPeer(ctx, owner, key, valueCopy, expire); err != nil { // <-- Usa valueCopy
+				// Si falla la comunicación con el dueño, retornamos error.
+				// La política aquí podría variar (¿continuar actualizando otros peers?).
+				// Actualmente, si falla con el dueño, la operación Set completa falla.
 				return nil, err
 			}
 		}
-		// Update the local caches
-		bv := transport.ByteViewWithExpire(value, expire)
+
+		// Actualizar las cachés locales (mainCache y hotCache) de este nodo.
+		// Se usa la copia del valor para crear la ByteView.
+		bv := transport.ByteViewWithExpire(valueCopy, expire) // <-- Usa valueCopy
+
+		// Usamos el lock del loadGroup (singleflight de Get) para sincronizar
+		// el acceso a las cachés locales (mainCache y hotCache).
+		// Esto previene condiciones de carrera si un Get local ocurre
+		// exactamente al mismo tiempo que esta actualización.
 		g.loadGroup.Lock(func() {
-			g.mainCache.Add(key, bv)
-			g.hotCache.Remove(key)
+			g.mainCache.Add(key, bv) // Añade/sobrescribe en mainCache.
+			g.hotCache.Remove(key)   // Elimina de hotCache (si existía).
 		})
 
-		// Update all peers in the cluster
+		// Actualizar todos los demás peers en el clúster (excepto este nodo y el dueño).
 		var wg sync.WaitGroup
 		for _, p := range g.instance.getAllPeers() {
+			// Saltar la actualización a sí mismo.
 			if p.PeerInfo().IsSelf {
-				continue // Skip self
+				continue
 			}
 
-			// Do not update the owner again, we already updated them
+			// Saltar la actualización al dueño (ya se hizo si era remoto,
+			// y si era local, la actualización local ya ocurrió).
 			if p.HashKey() == owner.HashKey() {
 				continue
 			}
 
+			// Incrementar el contador del WaitGroup para esta goroutine.
 			wg.Add(1)
+			// Lanzar una goroutine para actualizar a este peer de forma asíncrona.
 			go func(p peer.Client) {
-				if err := g.setPeer(ctx, p, key, value, expire); err != nil {
+				// *** INICIO: Asegurar wg.Done() y Recuperar Pánico ***
+				// defer wg.Done() es crucial para asegurar que Wait() no se bloquee
+				// indefinidamente si g.setPeer panica.
+				defer wg.Done()
+
+				// Opcional pero recomendado: Recuperar pánicos dentro de la goroutine
+				// para loguearlos y evitar que el programa entero caiga.
+				defer func() {
+					if r := recover(); r != nil {
+						g.instance.opts.Logger.Error("PANIC during setPeer",
+							"peer", p.PeerInfo().Address,
+							"key", key,
+							"panic", fmt.Sprintf("%v", r),
+							// Considerar loguear stack trace: "stack", string(debug.Stack()),
+						)
+					}
+				}()
+				// *** FIN: Asegurar wg.Done() y Recuperar Pánico ***
+
+				// Llamar a setPeer para enviar la operación Set al peer (usando la copia).
+				// La goroutine captura 'valueCopy', que es la copia específica de esta ejecución de Set.
+				if err := g.setPeer(ctx, p, key, valueCopy, expire); err != nil { // <-- Usa valueCopy
+					// Loguear errores de comunicación con el peer, pero no hacer fallar
+					// la operación Set principal (es un esfuerzo "best-effort").
 					g.instance.opts.Logger.Error("while calling Set on peer",
 						"peer", p.PeerInfo().Address,
 						"key", key,
 						"err", err)
 				}
-				wg.Done()
-			}(p)
+			}(p) // Pasar el peer 'p' como argumento a la goroutine
 		}
+		// Esperar a que todas las goroutines de actualización de peers terminen.
+		// Esto asegura que la llamada a group.Set no retorne hasta que se haya
+		// intentado actualizar a todos los peers.
 		wg.Wait()
 
+		// La función de singleflight.Do retorna nil en caso de éxito.
 		return nil, nil
-	})
+	}) // Fin de singleflight.Do
+
+	// Retornar el error de singleflight.Do (si lo hubo).
 	return err
 }
 
@@ -235,13 +293,27 @@ func (g *group) Remove(ctx context.Context, key string) error {
 		owner, isRemote := g.instance.PickPeer(key)
 		if isRemote {
 			if err := g.removeFromPeer(ctx, owner, key); err != nil {
+				// Si falla la eliminación en el dueño, retornamos error.
+				// Podría considerarse continuar con los otros peers, pero
+				// actualmente la operación Remove completa falla.
 				return nil, err
 			}
 		}
 		// Remove from our cache next
-		g.LocalRemove(key)
+		g.LocalRemove(key) // Elimina de mainCache y hotCache locales
+
+		// --- INICIO MODIFICACIÓN ---
 		wg := sync.WaitGroup{}
-		errCh := make(chan error)
+		// Usamos un buffered channel para evitar bloqueos si hay muchos errores rápidos
+		// y el lector (más abajo) no es lo suficientemente rápido. El tamaño puede ajustarse.
+		numPeersToNotify := 0
+		for _, p := range g.instance.getAllPeers() {
+			if p != owner { // Contar cuántos peers necesitan notificación
+				numPeersToNotify++
+			}
+		}
+		// Crear canal con buffer suficiente para todos los posibles errores + 1 (por si acaso)
+		errCh := make(chan error, numPeersToNotify+1)
 
 		// Asynchronously clear the key from all hot and main caches of peers
 		for _, p := range g.instance.getAllPeers() {
@@ -249,24 +321,65 @@ func (g *group) Remove(ctx context.Context, key string) error {
 			if p == owner {
 				continue
 			}
+			// Saltar a sí mismo (LocalRemove ya lo hizo)
+			if p.PeerInfo().IsSelf {
+				continue
+			}
 
 			wg.Add(1)
 			go func(p peer.Client) {
-				errCh <- g.removeFromPeer(ctx, p, key)
-				wg.Done()
-			}(p)
+				// *** AÑADIR defer wg.Done() ***
+				// Asegura que wg.Done() se llame incluso si removeFromPeer panica.
+				defer wg.Done()
+
+				// *** Opcional pero recomendado: Añadir recover() ***
+				defer func() {
+					if r := recover(); r != nil {
+						// Loguear el pánico
+						g.instance.opts.Logger.Error("PANIC during removeFromPeer",
+							"peer", p.PeerInfo().Address,
+							"key", key,
+							"panic", fmt.Sprintf("%v", r),
+							// Considerar loguear stack trace: "stack", string(debug.Stack()),
+						)
+						// Opcionalmente, enviar un error específico al canal
+						// errCh <- fmt.Errorf("panic during removeFromPeer for peer %s: %v", p.PeerInfo().Address, r)
+					}
+				}()
+
+				// Llamar a removeFromPeer y enviar el resultado (error o nil) al canal
+				err := g.removeFromPeer(ctx, p, key)
+				if err != nil {
+					// Loguear el error específico de este peer
+					g.instance.opts.Logger.Error("while calling Remove on peer",
+						"peer", p.PeerInfo().Address,
+						"key", key,
+						"err", err)
+				}
+				// Enviar el error (puede ser nil) al canal para agregación
+				errCh <- err
+
+				// wg.Done() // Ya no es necesario aquí explícitamente
+			}(p) // Pasar el peer 'p' como argumento
 		}
+
+		// Goroutine para esperar a que todas las llamadas a removeFromPeer terminen y luego cerrar el canal de errores
 		go func() {
 			wg.Wait()
 			close(errCh)
 		}()
+		// --- FIN MODIFICACIÓN ---
 
-		m := &MultiError{}
+		// Recolectar todos los errores del canal
+		m := &MultiError{} // Asumiendo que tienes una estructura MultiError o similar
 		for err := range errCh {
-			m.Add(err)
+			if err != nil { // Solo añadir errores reales
+				m.Add(err)
+			}
 		}
 
-		return nil, m.NilOrError()
+		// Retornar nil si no hubo errores, o el MultiError si los hubo
+		return nil, m.NilOrError() // Asumiendo que NilOrError() devuelve nil si no hay errores
 	})
 	return err
 }

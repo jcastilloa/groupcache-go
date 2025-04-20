@@ -18,6 +18,7 @@ package transport
 
 import (
 	"context"
+	"github.com/groupcache/groupcache-go/v3"
 	"time"
 )
 
@@ -27,4 +28,6 @@ type Group interface {
 	Remove(context.Context, string) error
 	UsedBytes() (int64, int64)
 	Name() string
+	ExportCacheStats(groupcache.CacheType) groupcache.CacheStats
+	ExportGroupStats() groupcache.GroupStats
 }

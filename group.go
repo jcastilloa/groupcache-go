@@ -39,6 +39,8 @@ type Group interface {
 	Remove(context.Context, string) error
 	UsedBytes() (int64, int64)
 	Name() string
+	ExportCacheStats(CacheType) CacheStats
+	ExportGroupStats() GroupStats
 }
 
 // A Getter loads data for a key.
@@ -108,6 +110,14 @@ func (g *group) Name() string {
 // UsedBytes returns the total number of bytes used by the main and hot caches
 func (g *group) UsedBytes() (mainCache int64, hotCache int64) {
 	return g.mainCache.Bytes(), g.hotCache.Bytes()
+}
+
+func (g *group) ExportCacheStats(which CacheType) CacheStats {
+	return g.CacheStats(which)
+}
+
+func (g *group) ExportGroupStats() GroupStats {
+	return g.Stats
 }
 
 func (g *group) Get(ctx context.Context, key string, dest transport.Sink) error {

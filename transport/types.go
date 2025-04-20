@@ -18,7 +18,6 @@ package transport
 
 import (
 	"context"
-	"github.com/groupcache/groupcache-go/v3"
 	"time"
 )
 
@@ -28,6 +27,34 @@ type Group interface {
 	Remove(context.Context, string) error
 	UsedBytes() (int64, int64)
 	Name() string
-	ExportCacheStats(groupcache.CacheType) groupcache.CacheStats
-	ExportGroupStats() groupcache.GroupStats
+	ExportCacheStats(which int) CacheStats
+	ExportGroupStats() GroupStats
 }
+
+type CacheStats struct {
+	Rejected  int64
+	Bytes     int64
+	Items     int64
+	Gets      int64
+	Hits      int64
+	Evictions int64
+}
+
+// Definir GroupStats en el paquete transport
+type GroupStats struct {
+	Gets                     int64
+	CacheHits                int64
+	GetFromPeersLatencyLower int64
+	PeerLoads                int64
+	PeerErrors               int64
+	Loads                    int64
+	LoadsDeduped             int64
+	LocalLoads               int64
+	LocalLoadErrs            int64
+}
+
+// Constantes para el tipo de caché
+const (
+	MainCache = iota + 1
+	HotCache
+)

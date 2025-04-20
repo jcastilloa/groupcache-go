@@ -39,8 +39,8 @@ type Group interface {
 	Remove(context.Context, string) error
 	UsedBytes() (int64, int64)
 	Name() string
-	ExportCacheStats(CacheType) CacheStats
-	ExportGroupStats() GroupStats
+	ExportCacheStats(which int) transport.CacheStats
+	ExportGroupStats() transport.GroupStats
 }
 
 // A Getter loads data for a key.
@@ -112,12 +112,30 @@ func (g *group) UsedBytes() (mainCache int64, hotCache int64) {
 	return g.mainCache.Bytes(), g.hotCache.Bytes()
 }
 
-func (g *group) ExportCacheStats(which CacheType) CacheStats {
-	return g.CacheStats(which)
+func (g *group) ExportCacheStats(which int) transport.CacheStats {
+	stats := g.CacheStats(CacheType(which))
+	return transport.CacheStats{
+		Rejected:  stats.Rejected,
+		Bytes:     stats.Bytes,
+		Items:     stats.Items,
+		Gets:      stats.Gets,
+		Hits:      stats.Hits,
+		Evictions: stats.Evictions,
+	}
 }
 
-func (g *group) ExportGroupStats() GroupStats {
-	return g.Stats
+func (g *group) ExportGroupStats() transport.GroupStats {
+	return transport.GroupStats{
+		Gets:                     g.Stats.Gets.Get(),
+		CacheHits:                g.Stats.CacheHits.Get(),
+		GetFromPeersLatencyLower: g.Stats.GetFromPeersLatencyLower.Get(),
+		PeerLoads:                g.Stats.PeerLoads.Get(),
+		PeerErrors:               g.Stats.PeerErrors.Get(),
+		Loads:                    g.Stats.Loads.Get(),
+		LoadsDeduped:             g.Stats.LoadsDeduped.Get(),
+		LocalLoads:               g.Stats.LocalLoads.Get(),
+		LocalLoadErrs:            g.Stats.LocalLoadErrs.Get(),
+	}
 }
 
 func (g *group) Get(ctx context.Context, key string, dest transport.Sink) error {

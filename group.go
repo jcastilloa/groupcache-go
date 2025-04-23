@@ -547,9 +547,16 @@ func (g *group) lookupCache(key string) (value transport.ByteView, ok bool) {
 	return
 }
 
+func (g *group) isOwner(key string) bool {
+	// PickPeer devuelve (cliente, isRemote)
+	// Si isRemote == false, este nodo es el dueño.
+	_, remote := g.instance.PickPeer(key)
+	return !remote
+}
+
 // RemoteSet is called by the transport to set values in the local and hot caches when
 // a remote peer sends us a pb.SetRequest
-func (g *group) RemoteSet(key string, value []byte, expire time.Time) {
+/*func (g *group) RemoteSet(key string, value []byte, expire time.Time) {
 	if g.maxCacheBytes <= 0 {
 		return
 	}
@@ -565,6 +572,29 @@ func (g *group) RemoteSet(key string, value []byte, expire time.Time) {
 
 		// It's possible the value could be in the hot cache.
 		g.hotCache.Remove(key)
+	})
+}*/
+
+func (g *group) RemoteSet(key string, value []byte, expire time.Time) {
+	if g.maxCacheBytes <= 0 {
+		return
+	}
+
+	// Construimos el ByteView una sola vez
+	bv := transport.ByteViewWithExpire(value, expire)
+
+	// Bloqueamos los Gets mientras actualizamos las cachés locales
+	g.loadGroup.Lock(func() {
+		if g.isOwner(key) {
+			// Este nodo es el propietario ► almacena en mainCache
+			g.mainCache.Add(key, bv)
+			// Por si la clave ya estaba de paso en hotCache
+			g.hotCache.Remove(key)
+		} else {
+			// Nodo no-dueño ► replica en hotCache (límite 1/8)
+			g.hotCache.Add(key, bv)
+			// Nunca la guardamos en mainCache aquí
+		}
 	})
 }
 

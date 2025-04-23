@@ -283,14 +283,10 @@ func (t *HttpTransport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		b := bufferPool.Get().(*bytes.Buffer)
 		b.Reset()
-		bufferPool.Put(b)
 		defer func() {
-			bufferPool.Put(b)
-			/*if b.Cap() > maxBufferSize {
-				b = nil
-			} else {
+			if b.Cap() <= maxBufferSize {
 				bufferPool.Put(b)
-			}*/
+			}
 		}()
 		_, err := io.Copy(b, r.Body)
 		if err != nil {
@@ -309,7 +305,9 @@ func (t *HttpTransport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if out.Expire != nil && *out.Expire != 0 {
 			expire = time.Unix(*out.Expire/int64(time.Second), *out.Expire%int64(time.Second))
 		}
-		group.RemoteSet(*out.Key, out.Value, expire)
+		val := make([]byte, len(out.Value))
+		copy(val, out.Value)
+		group.RemoteSet(*out.Key, val, expire)
 		return
 	}
 
@@ -390,18 +388,15 @@ func (h *HttpClient) Get(ctx context.Context, in *pb.GetRequest, out *pb.GetResp
 
 		return fmt.Errorf("server returned: %v, %v", res.Status, string(msg))
 	}
+
 	b := bufferPool.Get().(*bytes.Buffer)
 	b.Reset()
 	defer func() {
-		/*if b.Cap() > maxBufferSize {
-			b = nil
-		} else {
-			bufferPool.Put(b)
-		}*/
-		bufferPool.Put(b)
+		if b.Cap() <= maxBufferSize {
+			bufferPool.Put(b) // único Put
+		}
 	}()
-	b.Reset()
-	defer bufferPool.Put(b)
+
 	_, err := io.Copy(b, res.Body)
 	if err != nil {
 		return fmt.Errorf("reading response body: %v", err)

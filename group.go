@@ -207,13 +207,13 @@ func (g *group) Set(ctx context.Context, key string, value []byte, expire time.T
 		// Se usa la copia del valor para crear la ByteView.
 		bv := transport.ByteViewWithExpire(valueCopy, expire) // <-- Usa valueCopy
 
-		// Usamos el lock del loadGroup (singleflight de Get) para sincronizar
-		// el acceso a las cachés locales (mainCache y hotCache).
-		// Esto previene condiciones de carrera si un Get local ocurre
-		// exactamente al mismo tiempo que esta actualización.
 		g.loadGroup.Lock(func() {
-			g.mainCache.Add(key, bv) // Añade/sobrescribe en mainCache.
-			g.hotCache.Remove(key)   // Elimina de hotCache (si existía).
+			if g.isOwner(key) {
+				g.mainCache.Add(key, bv)
+				g.hotCache.Remove(key)
+			} else {
+				g.hotCache.Add(key, bv)
+			}
 		})
 
 		// Actualizar todos los demás peers en el clúster (excepto este nodo y el dueño).

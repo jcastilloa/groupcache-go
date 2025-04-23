@@ -368,43 +368,61 @@ type HttpClient struct {
 	client *http.Client
 }
 
+// Get recupera la clave <in.Group>/<in.Key> desde el peer remoto y
+// coloca el resultado en 'out'.  Se asegura de que el buffer que
+// viene del sync.Pool NO quede referenciado por la caché.
 func (h *HttpClient) Get(ctx context.Context, in *pb.GetRequest, out *pb.GetResponse) error {
+	// ---------- 1. lanzar la petición --------------------------
 	var res http.Response
 	if err := h.makeRequest(ctx, http.MethodGet, in, nil, &res); err != nil {
 		return err
 	}
 	defer res.Body.Close()
+
+	// ---------- 2. gestionar códigos de error ------------------
 	if res.StatusCode != http.StatusOK {
-		// Limit reading the error body to max 1 MiB
+		// leemos (máx. 1 MiB) el cuerpo de error para incluirlo en el msg
 		msg, _ := io.ReadAll(io.LimitReader(res.Body, 1024*1024))
 
-		if res.StatusCode == http.StatusNotFound {
+		switch res.StatusCode {
+		case http.StatusNotFound:
 			return &ErrNotFound{Msg: strings.Trim(string(msg), "\n")}
-		}
-
-		if res.StatusCode == http.StatusServiceUnavailable {
+		case http.StatusServiceUnavailable:
 			return &ErrRemoteCall{Msg: strings.Trim(string(msg), "\n")}
+		default:
+			return fmt.Errorf("server returned: %v, %v", res.Status, string(msg))
 		}
-
-		return fmt.Errorf("server returned: %v, %v", res.Status, string(msg))
 	}
 
+	// ---------- 3. leer la respuesta en un *bytes.Buffer -------
 	b := bufferPool.Get().(*bytes.Buffer)
 	b.Reset()
 	defer func() {
+		// devolvemos el buffer al pool SOLO si no es gigante
 		if b.Cap() <= maxBufferSize {
-			bufferPool.Put(b) // único Put
+			bufferPool.Put(b)
 		}
 	}()
 
-	_, err := io.Copy(b, res.Body)
-	if err != nil {
+	if _, err := io.Copy(b, res.Body); err != nil {
 		return fmt.Errorf("reading response body: %v", err)
 	}
-	err = proto.Unmarshal(b.Bytes(), out)
-	if err != nil {
+
+	// ---------- 4. des-serializar el proto ---------------------
+	if err := proto.Unmarshal(b.Bytes(), out); err != nil {
 		return fmt.Errorf("decoding response body: %v", err)
 	}
+
+	// ---------- 5. copia defensiva para romper la referencia ---
+	// out.Value apunta al array interno de 'b'.  Copiamos para
+	// que la caché no retenga ese array y el buffer pueda
+	// reutilizarse / ser liberado por el GC.
+	if out.Value != nil {
+		val := make([]byte, len(out.Value))
+		copy(val, out.Value)
+		out.Value = val
+	}
+
 	return nil
 }
 

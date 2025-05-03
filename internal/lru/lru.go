@@ -155,3 +155,12 @@ func (c *Cache) Clear() {
 	c.ll = nil
 	c.cache = nil
 }
+
+// Walk ejecuta f para cada elemento, del más reciente al más antiguo.
+// No hace locking interno; quien lo llame debe garantizar la exclusión.
+func (c *Cache) Walk(f func(key Key, value interface{})) {
+	for e := c.ll.Front(); e != nil; e = e.Next() {
+		ent := e.Value.(*entry)
+		f(ent.key, ent.value)
+	}
+}

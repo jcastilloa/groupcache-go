@@ -138,6 +138,17 @@ func (g *group) ExportGroupStats() transport.GroupStats {
 	}
 }
 
+// DumpKeys fusiona main + hot y devuelve la lista completa ordenada.
+func (g *group) DumpKeys() []ItemInfo {
+	main := g.mainCache.(*mutexCache).items(false)
+	hot := g.hotCache.(*mutexCache).items(true)
+
+	combined := make([]ItemInfo, 0, len(main)+len(hot))
+	combined = append(combined, main...)
+	combined = append(combined, hot...)
+	return combined // [] si ambas están vacías
+}
+
 func (g *group) Get(ctx context.Context, key string, dest transport.Sink) error {
 	g.Stats.Gets.Add(1)
 	if dest == nil {

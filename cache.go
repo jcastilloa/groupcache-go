@@ -59,11 +59,41 @@ type mutexCache struct {
 	maxBytes              int64
 }
 
+// ItemInfo describe una entrada individual.
+type ItemInfo struct {
+	Key  string
+	Size int64
+	Hot  bool
+}
+
 // newMutexCache creates a new cache. If maxBytes == 0 then size of the cache is unbounded.
 func newMutexCache(maxBytes int64) *mutexCache {
 	return &mutexCache{
 		maxBytes: maxBytes,
 	}
+}
+
+// items recorre la lru y devuelve el inventario.   hot == true
+// cuando pertenece al hot-cache.
+func (m *mutexCache) items(hot bool) []ItemInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// devolver slice vacío, nunca nil
+	if m.lru == nil {
+		return []ItemInfo{}
+	}
+
+	out := make([]ItemInfo, 0, m.lru.Len())
+	m.lru.Walk(func(k lru.Key, v interface{}) {
+		bv := v.(transport.ByteView)
+		out = append(out, ItemInfo{
+			Key:  k.(string),
+			Size: int64(len(k.(string))) + int64(bv.Len()),
+			Hot:  hot,
+		})
+	})
+	return out
 }
 
 func (m *mutexCache) Stats() CacheStats {
